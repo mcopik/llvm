@@ -28,6 +28,7 @@
 #include <cassert>
 #include <cstddef>
 
+
 namespace llvm {
 
 class APInt;
@@ -40,7 +41,7 @@ class Type;
     // These should be ordered in terms of increasing complexity to make the
     // folders simpler.
     scConstant, scTruncate, scZeroExtend, scSignExtend, scAddExpr, scMulExpr,
-    scUDivExpr, scAddRecExpr, scUMaxExpr, scSMaxExpr,
+    scUDivExpr, scAddRecExpr, scAddMulExpr, scUMaxExpr, scSMaxExpr,
     scUnknown, scCouldNotCompute
   };
 
@@ -187,7 +188,8 @@ class Type;
              S->getSCEVType() == scMulExpr ||
              S->getSCEVType() == scSMaxExpr ||
              S->getSCEVType() == scUMaxExpr ||
-             S->getSCEVType() == scAddRecExpr;
+             S->getSCEVType() == scAddRecExpr ||
+             S->getSCEVType() == scAddMulExpr;
     }
   };
 
@@ -358,6 +360,57 @@ class Type;
     }
   };
 
+  /// This node represents an affine update of a variable in the loop of the form:
+  /// x = x_0
+  /// loop:
+  ///     x = a*x + b, where a and b are loop invariants
+  /// The corresponding CR has a form:
+  /// {x_0, +, (a-1)*b + x_0, *, a}
+  class SCEVAddMulExpr : public SCEVNAryExpr {
+      friend class ScalarEvolution;
+
+      const Loop *L;
+
+      SCEVAddMulExpr(const FoldingSetNodeIDRef ID,
+                     const SCEV *const *O, const Loop *l)
+          : SCEVNAryExpr(ID, scAddMulExpr, O, 3), L(l) {}
+
+  public:
+      const SCEV *getStart() const { return Operands[0]; }
+      const Loop *getLoop() const { return L; }
+
+      /// Set flags for a recurrence without clearing any previously set flags.
+      /// For AddRec, either NUW or NSW implies NW. Keep track of this fact here
+      /// to make it easier to propagate flags.
+      void setNoWrapFlags(NoWrapFlags Flags) {
+        if (Flags & (FlagNUW | FlagNSW))
+          Flags = ScalarEvolution::setFlags(Flags, FlagNW);
+        SubclassData |= Flags;
+      }
+
+      /// Return the value of this chain of recurrences at the specified
+      /// iteration number.
+      const SCEV *evaluateAtIteration(const SCEVConstant *It, ScalarEvolution &SE) const;
+
+      /// Return the number of iterations of this loop that produce
+      /// values in the specified constant range.  Another way of
+      /// looking at this is that it returns the first iteration number
+      /// where the value is not in the condition, thus computing the
+      /// exit count.  If the iteration count can't be computed, an
+      /// instance of SCEVCouldNotCompute is returned.
+      //const SCEV *getNumIterationsInRange(const ConstantRange &Range,
+      //                                    ScalarEvolution &SE) const;
+
+      /// Return an expression representing the value of this expression
+      /// one iteration of the loop ahead.
+      //const SCEVAddRecExpr *getPostIncExpr(ScalarEvolution &SE) const;
+
+      /// Methods for support type inquiry through isa, cast, and dyn_cast:
+      static bool classof(const SCEV *S) {
+        return S->getSCEVType() == scAddMulExpr;
+      }
+  };
+
   /// This class represents a signed maximum selection.
   class SCEVSMaxExpr : public SCEVCommutativeExpr {
     friend class ScalarEvolution;
@@ -520,6 +573,7 @@ class Type;
         case scSMaxExpr:
         case scUMaxExpr:
         case scAddRecExpr:
+        case scAddMulExpr:
           for (const auto *Op : cast<SCEVNAryExpr>(S)->operands())
             push(Op);
           break;

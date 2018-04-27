@@ -567,6 +567,10 @@ public:
     SmallVector<const SCEV *, 4> NewOp(Operands.begin(), Operands.end());
     return getAddRecExpr(NewOp, L, Flags);
   }
+  const SCEV *getAddMulExpr(const SCEV *startValue,
+                            const SmallVector<const SCEV *, 2> affineFunction,
+                            const Loop *L,
+                            SCEV::NoWrapFlags Flags);
 
   /// Checks if \p SymbolicPHI can be rewritten as an AddRecExpr under some
   /// Predicates. If successful return these <AddRecExpr, Predicates>;
@@ -1428,6 +1432,9 @@ private:
 
   /// A helper function for createAddRecFromPHI to handle simple cases.
   const SCEV *createSimpleAffineAddRec(PHINode *PN, Value *BEValueV,
+                                            Value *StartValueV);
+
+  const SCEV *createAddMulRecFromPHI(PHINode *PN, Value *BEValueV,
                                             Value *StartValueV);
 
   /// Helper function called from createNodeForPHI.

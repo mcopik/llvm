@@ -263,6 +263,21 @@ void SCEV::print(raw_ostream &OS) const {
     OS << ">";
     return;
   }
+  case scAddMulExpr: {
+    const SCEVAddMulExpr *MR = cast<SCEVAddMulExpr>(this);
+    OS << "{" << *MR->getOperand(0) << ",+," << *MR->getOperand(1) << ",*,"
+        << *MR->getOperand(2) << "}<";
+    if (MR->hasNoUnsignedWrap())
+      OS << "nuw><";
+    if (MR->hasNoSignedWrap())
+      OS << "nsw><";
+    if (MR->hasNoSelfWrap() &&
+        !MR->getNoWrapFlags((NoWrapFlags)(FlagNUW | FlagNSW)))
+      OS << "nw><";
+    MR->getLoop()->getHeader()->printAsOperand(OS, /*PrintType=*/false);
+    OS << ">";
+    return;
+  }
   case scAddExpr:
   case scMulExpr:
   case scUMaxExpr:
@@ -339,6 +354,7 @@ Type *SCEV::getType() const {
   case scSignExtend:
     return cast<SCEVCastExpr>(this)->getType();
   case scAddRecExpr:
+  case scAddMulExpr:
   case scMulExpr:
   case scUMaxExpr:
   case scSMaxExpr:
@@ -1217,6 +1233,26 @@ const SCEV *SCEVAddRecExpr::evaluateAtIteration(const SCEV *It,
     Result = SE.getAddExpr(Result, SE.getMulExpr(getOperand(i), Coeff));
   }
   return Result;
+}
+
+/// The evaluation at point i is defined as
+/// f(i) = x_0 + sum_{j = 0}^{i} ( ((a-1)*b + x_0) * product_{k = 0}^{j} a)
+const SCEV *SCEVAddMulExpr::evaluateAtIteration(const SCEVConstant *It,
+                                                ScalarEvolution &SE) const {
+
+    auto i = It->getAPInt();
+    const SCEV * constantFactor = getOperand(1);
+    const SCEV * productArg = getOperand(2);
+    const SCEV * product = SE.getOne( productArg->getType() );
+    const SCEV *Result = getStart();
+
+    for(unsigned j = 0; j != i; ++j) {
+
+      for(unsigned k = 0; k != j; ++k) {
+
+      }
+    }
+    return Result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -4780,10 +4816,101 @@ bool PredicatedScalarEvolution::areAddRecsEqualWithPreds(
   return true;
 }
 
+/// Create a SCEVAddMulExpr object from the parameters:
+/// 1) initial value x_0
+/// 2) affine function parameters a, b
+/// Code is based on a similar implementation in getAddRecExpr
+const SCEV *ScalarEvolution::getAddMulExpr(const SCEV *startValue,
+                          const SmallVector<const SCEV *, 2> affineFunction,
+                          const Loop *L,
+                          SCEV::NoWrapFlags Flags)
+{
+  FoldingSetNodeID ID;
+  ID.AddInteger(scAddMulExpr);
+  ID.AddPointer(startValue);
+  ID.AddPointer(affineFunction[0]);
+  ID.AddPointer(affineFunction[1]);
+  ID.AddPointer(L);
+  void *IP = nullptr;
+  SCEVAddMulExpr *S =
+      static_cast<SCEVAddMulExpr *>(UniqueSCEVs.FindNodeOrInsertPos(ID, IP));
+  if(!S) {
+    const SCEV **O = SCEVAllocator.Allocate<const SCEV *>(3);
+    O[0] = startValue;
+    std::uninitialized_copy(affineFunction.begin(), affineFunction.end(), O + 1);
+    S = new(SCEVAllocator) SCEVAddMulExpr(ID.Intern(SCEVAllocator), O, L);
+    UniqueSCEVs.InsertNode(S, IP);
+    addToLoopUseLists(S);
+  }
+  S->setNoWrapFlags(Flags);
+  return S;
+}
+
+/// Three cases are possible
+/// A) x = a*x, where the binary op matches Mul or Shl expr
+/// B) x = a*x + b, where the binary op matches addition with loop invariant (b)
+///     and the other side matches a Mul/Shr operator with PHI as one of operands
+const SCEV *ScalarEvolution::createAddMulRecFromPHI(PHINode *PN,
+                                             Value *BEValueV,
+                                             Value *StartValueV) {
+  const Loop *L = LI.getLoopFor(PN->getParent());
+  assert(L && L->getHeader() == PN->getParent());
+  assert(BEValueV && StartValueV);
+
+  auto BO = MatchBinaryOp(BEValueV, DT);
+  // Case A, multiplication
+  // Similar to createSimpleAffineAddRec - one of operands has to be our PHI node
+  // and the other one must be a constant multiplication factor
+  const SCEV *accum = nullptr;
+  const SCEV *freeParam = nullptr;
+  if (BO->Opcode == Instruction::Mul || BO->Opcode == Instruction::Shl) {
+    if (BO->LHS == PN && L->isLoopInvariant(BO->RHS))
+      accum = getSCEV(BO->RHS);
+    else if (BO->RHS == PN && L->isLoopInvariant(BO->LHS))
+      accum = getSCEV(BO->LHS);
+    // A shift of i bits corresponds to multiplication by a factor of 2^i
+    if (BO->Opcode == Instruction::Shl) {
+      const SCEVConstant * shiftOperand = dyn_cast<SCEVConstant>(accum);
+      // For the moment we don't support more complex shifts
+      if(!shiftOperand || !shiftOperand->getType()->isIntegerTy())
+        return getCouldNotCompute();
+      const APInt & intValue = shiftOperand->getAPInt();
+      accum = getConstant(
+          APInt::getOneBitSet(intValue.getBitWidth(), *intValue.getRawData())
+        );
+    }
+  }
+
+  if (!accum)
+    return nullptr;
+
+  SCEV::NoWrapFlags Flags = SCEV::FlagAnyWrap;
+  if (BO->IsNUW)
+    Flags = setFlags(Flags, SCEV::FlagNUW);
+  if (BO->IsNSW)
+    Flags = setFlags(Flags, SCEV::FlagNSW);
+
+  const SCEV *startVal = getSCEV(StartValueV);
+  SmallVector<const SCEV*, 2> affineFunction(2);
+  affineFunction[1] = accum;
+  // x = x_0; loop: x = a*x
+  // function is: {x_0, +, x_0, *, a}
+  if(!freeParam) {
+    affineFunction[0] = startVal;
+  }
+
+  const SCEV *PHISCEV = getAddMulExpr(startVal, affineFunction, L, Flags);
+  ValueExprMap[SCEVCallbackVH(PN, this)] = PHISCEV;
+
+  return PHISCEV;
+}
+
 /// A helper function for createAddRecFromPHI to handle simple cases.
 ///
 /// This function tries to find an AddRec expression for the simplest (yet most
 /// common) cases: PN = PHI(Start, OP(Self, LoopInvariant)).
+/// Otherwise, it might try to match for a SCEVAddMulExpr,
+/// where PN = PHI(Start, LoopInvariant*Self + LoopInvariant).
 /// If it fails, createAddRecFromPHI will use a more general, but slow,
 /// technique for finding the AddRec expression.
 const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
@@ -4797,8 +4924,10 @@ const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
   if (!BO)
     return nullptr;
 
-  if (BO->Opcode != Instruction::Add)
-    return nullptr;
+  // This might be a x = a*x expression
+  if (BO->Opcode != Instruction::Add) {
+    return createAddMulRecFromPHI(PN, BEValueV, StartValueV);
+  }
 
   const SCEV *Accum = nullptr;
   if (BO->LHS == PN && L->isLoopInvariant(BO->RHS))
@@ -4831,6 +4960,7 @@ const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
 }
 
 const SCEV *ScalarEvolution::createAddRecFromPHI(PHINode *PN) {
+
   const Loop *L = LI.getLoopFor(PN->getParent());
   if (!L || L->getHeader() != PN->getParent())
     return nullptr;
@@ -7796,6 +7926,7 @@ static Constant *BuildConstantFromSCEV(const SCEV *V) {
   switch (static_cast<SCEVTypes>(V->getSCEVType())) {
     case scCouldNotCompute:
     case scAddRecExpr:
+    case scAddMulExpr:
       break;
     case scConstant:
       return cast<SCEVConstant>(V)->getValue();
@@ -8071,6 +8202,11 @@ const SCEV *ScalarEvolution::computeSCEVAtScope(const SCEV *V, const Loop *L) {
     }
 
     return AddRec;
+  }
+
+  if (const SCEVAddMulExpr * Cast = dyn_cast<SCEVAddMulExpr>(V)) {
+    //FIXME: implement that - how?
+    return Cast;
   }
 
   if (const SCEVZeroExtendExpr *Cast = dyn_cast<SCEVZeroExtendExpr>(V)) {
@@ -11219,7 +11355,7 @@ ScalarEvolution::computeLoopDisposition(const SCEV *S, const Loop *L) {
   case scZeroExtend:
   case scSignExtend:
     return getLoopDisposition(cast<SCEVCastExpr>(S)->getOperand(), L);
-  case scAddRecExpr: {
+  case scAddRecExpr:{
     const SCEVAddRecExpr *AR = cast<SCEVAddRecExpr>(S);
 
     // If L is the addrec's loop, it's computable.
@@ -11249,6 +11385,8 @@ ScalarEvolution::computeLoopDisposition(const SCEV *S, const Loop *L) {
     // Otherwise it's loop-invariant.
     return LoopInvariant;
   }
+  case scAddMulExpr:
+    return LoopVariant;
   case scAddExpr:
   case scMulExpr:
   case scUMaxExpr:
@@ -11324,7 +11462,8 @@ ScalarEvolution::computeBlockDisposition(const SCEV *S, const BasicBlock *BB) {
   case scZeroExtend:
   case scSignExtend:
     return getBlockDisposition(cast<SCEVCastExpr>(S)->getOperand(), BB);
-  case scAddRecExpr: {
+  case scAddRecExpr:
+  case scAddMulExpr: {
     // This uses a "dominates" query instead of "properly dominates" query
     // to test for proper dominance too, because the instruction which
     // produces the addrec's value is a PHI, and a PHI effectively properly
