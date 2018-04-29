@@ -460,13 +460,13 @@ define void @test_08() {
 
 ; CHECK-LABEL: Classifying expressions for: @test_08
 ; CHECK:       %tmp11 = add i64 %iv.2.2, %iv.2.1
-; CHECK-NEXT:  -->  ({0,+,-1}<nsw><%loop_2> + %iv.2.1)
+; CHECK-NEXT:  -->  ({0,+,-1}<nsw><%loop_2> + {0,+,0,*,{2,+,1}<nuw><nsw><%loop_1>}<%loop_2>)
 ; CHECK:       %tmp12 = trunc i64 %tmp11 to i32
-; CHECK-NEXT:  -->  (trunc i64 ({0,+,-1}<nsw><%loop_2> + %iv.2.1) to i32)
+; CHECK-NEXT:  -->  (trunc i64 ({0,+,-1}<nsw><%loop_2> + {0,+,0,*,{2,+,1}<nuw><nsw><%loop_1>}<%loop_2>) to i32)
 ; CHECK:       %tmp14 = mul i32 %tmp12, %tmp7
-; CHECK-NEXT:  -->  ((trunc i64 ({0,+,-1}<nsw><%loop_2> + %iv.2.1) to i32) * {-1,+,-1}<%loop_1>)
+; CHECK-NEXT:  -->  ((trunc i64 ({0,+,-1}<nsw><%loop_2> + {0,+,0,*,{2,+,1}<nuw><nsw><%loop_1>}<%loop_2>) to i32) * {-1,+,-1}<%loop_1>)
 ; CHECK:       %tmp16 = mul i64 %iv.2.1, %iv.1.1
-; CHECK-NEXT:  -->  ({2,+,1}<nuw><nsw><%loop_1> * %iv.2.1)
+; CHECK-NEXT:  -->  ({2,+,1}<nuw><nsw><%loop_1> * {0,+,0,*,{2,+,1}<nuw><nsw><%loop_1>}<%loop_2>)
 
 entry:
   br label %loop_1
