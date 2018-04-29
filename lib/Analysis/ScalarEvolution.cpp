@@ -934,6 +934,7 @@ public:
   void visitSMaxExpr(const SCEVSMaxExpr *Numerator) {}
   void visitUMaxExpr(const SCEVUMaxExpr *Numerator) {}
   void visitUnknown(const SCEVUnknown *Numerator) {}
+  void visitAddMulExpr(const SCEVAddMulExpr *Numerator) {}
   void visitCouldNotCompute(const SCEVCouldNotCompute *Numerator) {}
 
   void visitConstant(const SCEVConstant *Numerator) {
@@ -4820,30 +4821,56 @@ bool PredicatedScalarEvolution::areAddRecsEqualWithPreds(
 /// 1) initial value x_0
 /// 2) affine function parameters a, b
 /// Code is based on a similar implementation in getAddRecExpr
-const SCEV *ScalarEvolution::getAddMulExpr(const SCEV *startValue,
-                          const SmallVector<const SCEV *, 2> affineFunction,
+const SCEV *ScalarEvolution::getAddMulExpr(const SmallVectorImpl<const SCEV *> &Operands,
                           const Loop *L,
                           SCEV::NoWrapFlags Flags)
 {
   FoldingSetNodeID ID;
   ID.AddInteger(scAddMulExpr);
-  ID.AddPointer(startValue);
-  ID.AddPointer(affineFunction[0]);
-  ID.AddPointer(affineFunction[1]);
+  for(const SCEV * op : Operands)
+    ID.AddPointer(op);
   ID.AddPointer(L);
   void *IP = nullptr;
   SCEVAddMulExpr *S =
       static_cast<SCEVAddMulExpr *>(UniqueSCEVs.FindNodeOrInsertPos(ID, IP));
   if(!S) {
     const SCEV **O = SCEVAllocator.Allocate<const SCEV *>(3);
-    O[0] = startValue;
-    std::uninitialized_copy(affineFunction.begin(), affineFunction.end(), O + 1);
+    std::uninitialized_copy(Operands.begin(), Operands.end(), O);
     S = new(SCEVAllocator) SCEVAddMulExpr(ID.Intern(SCEVAllocator), O, L);
     UniqueSCEVs.InsertNode(S, IP);
     addToLoopUseLists(S);
   }
   S->setNoWrapFlags(Flags);
   return S;
+}
+
+/// The function accepts a multiplication of loop invariant value with PHI value.
+/// Currently supports multiplication expressed with mul/shl operators
+/// Return the loop invariant value parsed to fit the original form value * PHI
+static const SCEV * extractMultiplicationWithPHI(
+    PHINode * PN,
+    const Loop *L,
+    Optional<BinaryOp> BO,
+    ScalarEvolution &SE
+)
+{
+  const SCEV * accum = nullptr;
+  if (BO->LHS == PN && L->isLoopInvariant(BO->RHS))
+    accum = SE.getSCEV(BO->RHS);
+  else if (BO->RHS == PN && L->isLoopInvariant(BO->LHS))
+    accum = SE.getSCEV(BO->LHS);
+  // A shift of i bits corresponds to multiplication by a factor of 2^i
+  if (accum && BO->Opcode == Instruction::Shl) {
+    const SCEVConstant * shiftOperand = dyn_cast<SCEVConstant>(accum);
+    // For the moment we don't support more complex shifts
+    if(!shiftOperand || !shiftOperand->getType()->isIntegerTy())
+      return nullptr;
+    const APInt & intValue = shiftOperand->getAPInt();
+    return SE.getConstant(
+        APInt::getOneBitSet(intValue.getBitWidth(), *intValue.getRawData())
+    );
+  }
+  return accum;
 }
 
 /// Three cases are possible
@@ -4864,20 +4891,32 @@ const SCEV *ScalarEvolution::createAddMulRecFromPHI(PHINode *PN,
   const SCEV *accum = nullptr;
   const SCEV *freeParam = nullptr;
   if (BO->Opcode == Instruction::Mul || BO->Opcode == Instruction::Shl) {
-    if (BO->LHS == PN && L->isLoopInvariant(BO->RHS))
-      accum = getSCEV(BO->RHS);
-    else if (BO->RHS == PN && L->isLoopInvariant(BO->LHS))
-      accum = getSCEV(BO->LHS);
-    // A shift of i bits corresponds to multiplication by a factor of 2^i
-    if (BO->Opcode == Instruction::Shl) {
-      const SCEVConstant * shiftOperand = dyn_cast<SCEVConstant>(accum);
-      // For the moment we don't support more complex shifts
-      if(!shiftOperand || !shiftOperand->getType()->isIntegerTy())
-        return getCouldNotCompute();
-      const APInt & intValue = shiftOperand->getAPInt();
-      accum = getConstant(
-          APInt::getOneBitSet(intValue.getBitWidth(), *intValue.getRawData())
-        );
+    accum = extractMultiplicationWithPHI(PN, L, BO, *this);
+  }
+  // Case B, addition
+  // One of operands has to be a loop invariant and the other should be
+  // a binary node which includes PHI.
+  // Either: Add(Inv, Mul(Inv, PHI)) or Or(Inv, Shl(Inv, PHI)).
+  else if(BO->Opcode == Instruction::Add || BO->Opcode == Instruction::Or) {
+    Value *nested = nullptr;
+    if(L->isLoopInvariant(BO->LHS)) {
+      nested = BO->RHS;
+      freeParam = getSCEV(BO->LHS);
+    } else if(L->isLoopInvariant(BO->RHS)) {
+      nested = BO->LHS;
+      freeParam = getSCEV(BO->RHS);
+    }
+    // we don't handle operators where both operands are not loop invariant
+    if(!nested)
+      return nullptr;
+    auto BONested = MatchBinaryOp(nested, DT);
+    if((BO->Opcode == Instruction::Add && BONested->Opcode == Instruction::Mul)
+       || (BO->Opcode == Instruction::Or && BONested->Opcode == Instruction::Shl)) {
+      accum = extractMultiplicationWithPHI(PN, L, BONested, *this);
+    }
+    // unknown case
+    else {
+      return nullptr;
     }
   }
 
@@ -4897,6 +4936,15 @@ const SCEV *ScalarEvolution::createAddMulRecFromPHI(PHINode *PN,
   // function is: {x_0, +, x_0, *, a}
   if(!freeParam) {
     affineFunction[0] = startVal;
+  }
+  // x = x_0; loop: x = a*x + b
+  // function is: {x_0, +, (a - 1)*x_0 + b, *, a}
+  else {
+    // (a - 1)
+    accum = getMinusSCEV(accum, getOne(accum->getType()));
+    // (a - 1)*x_0
+    accum = getMulExpr(accum, startVal);
+    affineFunction[0] = getAddExpr(accum, freeParam);
   }
 
   const SCEV *PHISCEV = getAddMulExpr(startVal, affineFunction, L, Flags);
@@ -4926,6 +4974,7 @@ const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
 
   // This might be a x = a*x expression
   if (BO->Opcode != Instruction::Add) {
+      // Leave the function no matter if we find addMulRecExpr or not.
     return createAddMulRecFromPHI(PN, BEValueV, StartValueV);
   }
 
@@ -4934,6 +4983,9 @@ const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
     Accum = getSCEV(BO->RHS);
   else if (BO->RHS == PN && L->isLoopInvariant(BO->LHS))
     Accum = getSCEV(BO->LHS);
+  // Look for x = a*x + b; PN hidden in the nested binary op.
+  else
+      return createAddMulRecFromPHI(PN, BEValueV, StartValueV);
 
   if (!Accum)
     return nullptr;

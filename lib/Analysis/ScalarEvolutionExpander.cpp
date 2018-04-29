@@ -1596,6 +1596,146 @@ Value *SCEVExpander::visitAddRecExpr(const SCEVAddRecExpr *S) {
   return expand(T);
 }
 
+Value *SCEVExpander::visitAddMulExpr(const SCEVAddMulExpr *S) {
+//  if (!CanonicalMode) return expandAddRecExprLiterally(S);
+//
+//  Type *Ty = SE.getEffectiveSCEVType(S->getType());
+//  const Loop *L = S->getLoop();
+//
+//  // First check for an existing canonical IV in a suitable type.
+//  PHINode *CanonicalIV = nullptr;
+//  if (PHINode *PN = L->getCanonicalInductionVariable())
+//    if (SE.getTypeSizeInBits(PN->getType()) >= SE.getTypeSizeInBits(Ty))
+//      CanonicalIV = PN;
+//
+//  // Rewrite an AddRec in terms of the canonical induction variable, if
+//  // its type is more narrow.
+//  if (CanonicalIV &&
+//      SE.getTypeSizeInBits(CanonicalIV->getType()) >
+//      SE.getTypeSizeInBits(Ty)) {
+//    SmallVector<const SCEV *, 4> NewOps(S->getNumOperands());
+//    for (unsigned i = 0, e = S->getNumOperands(); i != e; ++i)
+//      NewOps[i] = SE.getAnyExtendExpr(S->op_begin()[i], CanonicalIV->getType());
+//    Value *V = expand(SE.getAddRecExpr(NewOps, S->getLoop(),
+//                                       S->getNoWrapFlags(SCEV::FlagNW)));
+//    BasicBlock::iterator NewInsertPt =
+//        findInsertPointAfter(cast<Instruction>(V), Builder.GetInsertBlock());
+//    V = expandCodeFor(SE.getTruncateExpr(SE.getUnknown(V), Ty), nullptr,
+//                      &*NewInsertPt);
+//    return V;
+//  }
+//
+//  // {X,+,F} --> X + {0,+,F}
+//  if (!S->getStart()->isZero()) {
+//    SmallVector<const SCEV *, 4> NewOps(S->op_begin(), S->op_end());
+//    NewOps[0] = SE.getConstant(Ty, 0);
+//    const SCEV *Rest = SE.getAddRecExpr(NewOps, L,
+//                                        S->getNoWrapFlags(SCEV::FlagNW));
+//
+//    // Turn things like ptrtoint+arithmetic+inttoptr into GEP. See the
+//    // comments on expandAddToGEP for details.
+//    const SCEV *Base = S->getStart();
+//    const SCEV *RestArray[1] = { Rest };
+//    // Dig into the expression to find the pointer base for a GEP.
+//    ExposePointerBase(Base, RestArray[0], SE);
+//    // If we found a pointer, expand the AddRec with a GEP.
+//    if (PointerType *PTy = dyn_cast<PointerType>(Base->getType())) {
+//      // Make sure the Base isn't something exotic, such as a multiplied
+//      // or divided pointer value. In those cases, the result type isn't
+//      // actually a pointer type.
+//      if (!isa<SCEVMulExpr>(Base) && !isa<SCEVUDivExpr>(Base)) {
+//        Value *StartV = expand(Base);
+//        assert(StartV->getType() == PTy && "Pointer type mismatch for GEP!");
+//        return expandAddToGEP(RestArray, RestArray+1, PTy, Ty, StartV);
+//      }
+//    }
+//
+//    // Just do a normal add. Pre-expand the operands to suppress folding.
+//    //
+//    // The LHS and RHS values are factored out of the expand call to make the
+//    // output independent of the argument evaluation order.
+//    const SCEV *AddExprLHS = SE.getUnknown(expand(S->getStart()));
+//    const SCEV *AddExprRHS = SE.getUnknown(expand(Rest));
+//    return expand(SE.getAddExpr(AddExprLHS, AddExprRHS));
+//  }
+//
+//  // If we don't yet have a canonical IV, create one.
+//  if (!CanonicalIV) {
+//    // Create and insert the PHI node for the induction variable in the
+//    // specified loop.
+//    BasicBlock *Header = L->getHeader();
+//    pred_iterator HPB = pred_begin(Header), HPE = pred_end(Header);
+//    CanonicalIV = PHINode::Create(Ty, std::distance(HPB, HPE), "indvar",
+//                                  &Header->front());
+//    rememberInstruction(CanonicalIV);
+//
+//    SmallSet<BasicBlock *, 4> PredSeen;
+//    Constant *One = ConstantInt::get(Ty, 1);
+//    for (pred_iterator HPI = HPB; HPI != HPE; ++HPI) {
+//      BasicBlock *HP = *HPI;
+//      if (!PredSeen.insert(HP).second) {
+//        // There must be an incoming value for each predecessor, even the
+//        // duplicates!
+//        CanonicalIV->addIncoming(CanonicalIV->getIncomingValueForBlock(HP), HP);
+//        continue;
+//      }
+//
+//      if (L->contains(HP)) {
+//        // Insert a unit add instruction right before the terminator
+//        // corresponding to the back-edge.
+//        Instruction *Add = BinaryOperator::CreateAdd(CanonicalIV, One,
+//                                                     "indvar.next",
+//                                                     HP->getTerminator());
+//        Add->setDebugLoc(HP->getTerminator()->getDebugLoc());
+//        rememberInstruction(Add);
+//        CanonicalIV->addIncoming(Add, HP);
+//      } else {
+//        CanonicalIV->addIncoming(Constant::getNullValue(Ty), HP);
+//      }
+//    }
+//  }
+//
+//  // {0,+,1} --> Insert a canonical induction variable into the loop!
+//  if (S->isAffine() && S->getOperand(1)->isOne()) {
+//    assert(Ty == SE.getEffectiveSCEVType(CanonicalIV->getType()) &&
+//           "IVs with types different from the canonical IV should "
+//           "already have been handled!");
+//    return CanonicalIV;
+//  }
+//
+//  // {0,+,F} --> {0,+,1} * F
+//
+//  // If this is a simple linear addrec, emit it now as a special case.
+//  if (S->isAffine())    // {0,+,F} --> i*F
+//    return
+//        expand(SE.getTruncateOrNoop(
+//            SE.getMulExpr(SE.getUnknown(CanonicalIV),
+//                          SE.getNoopOrAnyExtend(S->getOperand(1),
+//                                                CanonicalIV->getType())),
+//            Ty));
+//
+//  // If this is a chain of recurrences, turn it into a closed form, using the
+//  // folders, then expandCodeFor the closed form.  This allows the folders to
+//  // simplify the expression without having to build a bunch of special code
+//  // into this folder.
+//  const SCEV *IH = SE.getUnknown(CanonicalIV);   // Get I as a "symbolic" SCEV.
+//
+//  // Promote S up to the canonical IV type, if the cast is foldable.
+//  const SCEV *NewS = S;
+//  const SCEV *Ext = SE.getNoopOrAnyExtend(S, CanonicalIV->getType());
+//  if (isa<SCEVAddRecExpr>(Ext))
+//    NewS = Ext;
+//
+//  const SCEV *V = cast<SCEVAddRecExpr>(NewS)->evaluateAtIteration(IH, SE);
+//  //cerr << "Evaluated: " << *this << "\n     to: " << *V << "\n";
+//
+//  // Truncate the result down to the original type, if needed.
+//  const SCEV *T = SE.getTruncateOrNoop(V, Ty);
+//  return expand(T);
+  return expandCodeFor(S->getOperand(0),
+                       SE.getEffectiveSCEVType(S->getOperand(0)->getType()));
+}
+
 Value *SCEVExpander::visitTruncateExpr(const SCEVTruncateExpr *S) {
   Type *Ty = SE.getEffectiveSCEVType(S->getType());
   Value *V = expandCodeFor(S->getOperand(),

@@ -515,6 +515,8 @@ class Type;
         return ((SC*)this)->visitUDivExpr((const SCEVUDivExpr*)S);
       case scAddRecExpr:
         return ((SC*)this)->visitAddRecExpr((const SCEVAddRecExpr*)S);
+      case scAddMulExpr:
+        return ((SC*)this)->visitAddMulExpr((const SCEVAddMulExpr*)S);
       case scSMaxExpr:
         return ((SC*)this)->visitSMaxExpr((const SCEVSMaxExpr*)S);
       case scUMaxExpr:
@@ -712,6 +714,18 @@ class Type;
       }
       return !Changed ? Expr
                       : SE.getAddRecExpr(Operands, Expr->getLoop(),
+                                         Expr->getNoWrapFlags());
+    }
+
+    const SCEV *visitAddMulExpr(const SCEVAddMulExpr *Expr) {
+      SmallVector<const SCEV *, 2> Operands;
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC*)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr
+                      : SE.getAddMulExpr(Operands, Expr->getLoop(),
                                          Expr->getNoWrapFlags());
     }
 
