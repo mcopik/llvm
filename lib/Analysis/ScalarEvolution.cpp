@@ -1240,20 +1240,18 @@ const SCEV *SCEVAddRecExpr::evaluateAtIteration(const SCEV *It,
 /// f(i) = x_0 + sum_{j = 0}^{i} ( ((a-1)*b + x_0) * product_{k = 0}^{j} a)
 const SCEV *SCEVAddMulExpr::evaluateAtIteration(const SCEVConstant *It,
                                                 ScalarEvolution &SE) const {
+  auto i = It->getAPInt();
+  const SCEV * constantFactor = getOperand(1);
+  const SCEV * productArg = getOperand(2);
+  const SCEV * product = SE.getOne( productArg->getType() );
+  const SCEV *Result = getStart();
+  for(unsigned j = 0; j != i; ++j) {
 
-    auto i = It->getAPInt();
-    const SCEV * constantFactor = getOperand(1);
-    const SCEV * productArg = getOperand(2);
-    const SCEV * product = SE.getOne( productArg->getType() );
-    const SCEV *Result = getStart();
+    for(unsigned k = 0; k != j; ++k) {
 
-    for(unsigned j = 0; j != i; ++j) {
-
-      for(unsigned k = 0; k != j; ++k) {
-
-      }
     }
-    return Result;
+  }
+  return Result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -4822,6 +4820,7 @@ bool PredicatedScalarEvolution::areAddRecsEqualWithPreds(
 /// 2) affine function parameters a, b
 /// Code is based on a similar implementation in getAddRecExpr
 const SCEV *ScalarEvolution::getAddMulExpr(const SmallVectorImpl<const SCEV *> &Operands,
+                          bool isAffine,
                           const Loop *L,
                           SCEV::NoWrapFlags Flags)
 {
@@ -4836,7 +4835,7 @@ const SCEV *ScalarEvolution::getAddMulExpr(const SmallVectorImpl<const SCEV *> &
   if(!S) {
     const SCEV **O = SCEVAllocator.Allocate<const SCEV *>(3);
     std::uninitialized_copy(Operands.begin(), Operands.end(), O);
-    S = new(SCEVAllocator) SCEVAddMulExpr(ID.Intern(SCEVAllocator), O, L);
+    S = new(SCEVAllocator) SCEVAddMulExpr(ID.Intern(SCEVAllocator), O, L, isAffine);
     UniqueSCEVs.InsertNode(S, IP);
     addToLoopUseLists(S);
   }
@@ -4932,6 +4931,7 @@ const SCEV *ScalarEvolution::createAddMulRecFromPHI(PHINode *PN,
   const SCEV *startVal = getSCEV(StartValueV);
   SmallVector<const SCEV*, 2> affineFunction(2);
   affineFunction[1] = accum;
+  bool isAffine = false;
   // x = x_0; loop: x = a*x
   // function is: {x_0, +, x_0, *, a}
   if(!freeParam) {
@@ -4945,9 +4945,10 @@ const SCEV *ScalarEvolution::createAddMulRecFromPHI(PHINode *PN,
     // (a - 1)*x_0
     accum = getMulExpr(accum, startVal);
     affineFunction[0] = getAddExpr(accum, freeParam);
+    isAffine = true;
   }
 
-  const SCEV *PHISCEV = getAddMulExpr(startVal, affineFunction, L, Flags);
+  const SCEV *PHISCEV = getAddMulExpr(startVal, affineFunction, isAffine, L, Flags);
   ValueExprMap[SCEVCallbackVH(PN, this)] = PHISCEV;
 
   return PHISCEV;
@@ -4984,8 +4985,9 @@ const SCEV *ScalarEvolution::createSimpleAffineAddRec(PHINode *PN,
   else if (BO->RHS == PN && L->isLoopInvariant(BO->LHS))
     Accum = getSCEV(BO->LHS);
   // Look for x = a*x + b; PN hidden in the nested binary op.
-  else
-      return createAddMulRecFromPHI(PN, BEValueV, StartValueV);
+  else {
+    return createAddMulRecFromPHI(PN, BEValueV, StartValueV);
+  }
 
   if (!Accum)
     return nullptr;

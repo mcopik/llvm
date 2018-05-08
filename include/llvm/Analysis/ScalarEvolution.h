@@ -569,14 +569,16 @@ public:
   }
   const SCEV *getAddMulExpr(const SCEV *startValue,
                             const SmallVector<const SCEV *, 2> affineFunction,
+                            bool isAffine,
                             const Loop *L,
                             SCEV::NoWrapFlags Flags) {
       SmallVector<const SCEV *, 3> NewOp = {startValue, affineFunction[0],
                                             affineFunction[1]};
-      return getAddMulExpr(NewOp, L, Flags);
+      return getAddMulExpr(NewOp, isAffine, L, Flags);
   }
 
   const SCEV *getAddMulExpr(const SmallVectorImpl<const SCEV *> &Operands,
+                            bool isAffine,
                             const Loop *L,
                             SCEV::NoWrapFlags Flags);
 

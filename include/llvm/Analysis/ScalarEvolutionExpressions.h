@@ -370,10 +370,20 @@ class Type;
       friend class ScalarEvolution;
 
       const Loop *L;
+      const bool isAffine;
 
+      /// Since the SCEVNAryExpr does not allow modifying parameters after construction
+      /// the ctor can't simply accept "x_0, a, b" as params and CR weights are
+      /// constructed by the caller. However, the detection of affinity (b > 0)
+      /// is not trivial in that case and it's easier to force the caller to set up
+      // a flag instead of manually searching parameters.
       SCEVAddMulExpr(const FoldingSetNodeIDRef ID,
-                     const SCEV *const *O, const Loop *l)
-          : SCEVNAryExpr(ID, scAddMulExpr, O, 3), L(l) {}
+                     const SCEV *const *O, const Loop *l,
+                     bool _isAffine = false)
+          : SCEVNAryExpr(ID, scAddMulExpr, O, 3),
+            L(l),
+            isAffine(_isAffine)
+      {}
 
   public:
       const SCEV *getStart() const { return Operands[0]; }
@@ -405,8 +415,13 @@ class Type;
       /// one iteration of the loop ahead.
       //const SCEVAddRecExpr *getPostIncExpr(ScalarEvolution &SE) const;
 
+      bool representsAffineUpdate() const {
+          return isAffine;
+      }
+
       /// Methods for support type inquiry through isa, cast, and dyn_cast:
       static bool classof(const SCEV *S) {
+
         return S->getSCEVType() == scAddMulExpr;
       }
   };
@@ -725,7 +740,8 @@ class Type;
         Changed |= Op != Operands.back();
       }
       return !Changed ? Expr
-                      : SE.getAddMulExpr(Operands, Expr->getLoop(),
+                      : SE.getAddMulExpr(Operands, Expr->representsAffineUpdate(),
+                                         Expr->getLoop(),
                                          Expr->getNoWrapFlags());
     }
 
